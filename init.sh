@@ -37,6 +37,13 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# Append a line to a file only if it is not already present (idempotent)
+append_once() {
+    local line="$1"
+    local file="$2"
+    grep -qxF "$line" "$file" 2>/dev/null || echo "$line" >> "$file"
+}
+
 # Function to ask for confirmation
 confirm_step() {
     local step_name="$1"
@@ -105,18 +112,126 @@ if confirm_step "Install Homebrew" "Homebrew is a package manager for macOS that
         brew update
         print_success "Homebrew updated"
     else
-        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-        print_success "Homebrew installed"
-        
-        # Add Homebrew to PATH for both Intel and Apple Silicon Macs
-        if [[ $(uname -m) == 'arm64' ]]; then
-            echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
-            eval "$(/opt/homebrew/bin/brew shellenv)"
-            print_success "Homebrew added to PATH for Apple Silicon Mac"
+        # Choose install source; on failure, return to this menu to try another source
+        while true; do
+            echo ""
+            echo "Select Homebrew install source:"
+            echo "  1) Official (GitHub)"
+            echo "  2) Tsinghua TUNA mirror (mainland China)"
+            echo "  3) USTC mirror (mainland China)"
+            echo "  q) Abort"
+            read -p "Enter choice [1-3/q] (default 1): " brew_source
+            brew_source=${brew_source:-1}
+
+            if [[ "$brew_source" == "q" ]]; then
+                print_error "Homebrew installation aborted"
+                exit 1
+            fi
+
+            # Clear mirror config possibly left over from a previous failed attempt
+            unset HOMEBREW_API_DOMAIN HOMEBREW_BOTTLE_DOMAIN \
+                  HOMEBREW_BREW_GIT_REMOTE HOMEBREW_CORE_GIT_REMOTE \
+                  HOMEBREW_INSTALL_FROM_API
+
+            brew_mirror_env=()
+            case "$brew_source" in
+                2)
+                    tuna="https://mirrors.tuna.tsinghua.edu.cn"
+                    brew_mirror_env=(
+                        "export HOMEBREW_API_DOMAIN=\"${tuna}/homebrew-bottles/api\""
+                        "export HOMEBREW_BOTTLE_DOMAIN=\"${tuna}/homebrew-bottles\""
+                        "export HOMEBREW_BREW_GIT_REMOTE=\"${tuna}/git/homebrew/brew.git\""
+                        "export HOMEBREW_CORE_GIT_REMOTE=\"${tuna}/git/homebrew/homebrew-core.git\""
+                    )
+                    brew_install_git="${tuna}/git/homebrew/install.git"
+                    brew_install_url=""
+                    ;;
+                3)
+                    ustc="https://mirrors.ustc.edu.cn"
+                    brew_mirror_env=(
+                        "export HOMEBREW_API_DOMAIN=\"${ustc}/homebrew-bottles/api\""
+                        "export HOMEBREW_BOTTLE_DOMAIN=\"${ustc}/homebrew-bottles\""
+                        "export HOMEBREW_BREW_GIT_REMOTE=\"${ustc}/brew.git\""
+                        "export HOMEBREW_CORE_GIT_REMOTE=\"${ustc}/homebrew-core.git\""
+                    )
+                    brew_install_git=""
+                    brew_install_url="${ustc}/misc/brew-install.sh"
+                    ;;
+                *)
+                    brew_install_git=""
+                    brew_install_url=""
+                    ;;
+            esac
+
+            install_failed=""
+            if [[ ${#brew_mirror_env[@]} -gt 0 ]]; then
+                # Apply mirror env vars so the installer clones brew from the mirror
+                for env_line in "${brew_mirror_env[@]}"; do
+                    eval "$env_line"
+                done
+                export HOMEBREW_INSTALL_FROM_API=1
+
+                # The install script itself must also come from the mirror
+                if [[ -n "$brew_install_git" ]]; then
+                    install_dir=$(mktemp -d)
+                    if ! git clone --depth=1 "$brew_install_git" "$install_dir"; then
+                        print_error "Failed to clone Homebrew install script from mirror"
+                        install_failed=1
+                    elif ! /bin/bash "$install_dir/install.sh"; then
+                        print_error "Homebrew installation failed"
+                        install_failed=1
+                    fi
+                    rm -rf "$install_dir"
+                else
+                    install_script=$(curl -fsSL "$brew_install_url")
+                    if [[ -z "$install_script" ]]; then
+                        print_error "Failed to download Homebrew install script from mirror"
+                        install_failed=1
+                    elif ! /bin/bash -c "$install_script"; then
+                        print_error "Homebrew installation failed"
+                        install_failed=1
+                    fi
+                fi
+            else
+                install_script=$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)
+                if [[ -z "$install_script" ]]; then
+                    print_error "Failed to download Homebrew install script (check network/proxy)"
+                    install_failed=1
+                elif ! /bin/bash -c "$install_script"; then
+                    print_error "Homebrew installation failed"
+                    install_failed=1
+                fi
+            fi
+
+            if [[ -n "$install_failed" ]]; then
+                echo "Installation failed. Pick another source, or 'q' to abort."
+                continue
+            fi
+            break
+        done
+
+        # Locate the installed brew binary (Apple Silicon or Intel)
+        if [[ -x /opt/homebrew/bin/brew ]]; then
+            brew_path=/opt/homebrew/bin/brew
+        elif [[ -x /usr/local/bin/brew ]]; then
+            brew_path=/usr/local/bin/brew
         else
-            echo 'eval "$(/usr/local/bin/brew shellenv)"' >> ~/.zprofile
-            eval "$(/usr/local/bin/brew shellenv)"
-            print_success "Homebrew added to PATH for Intel Mac"
+            print_error "brew binary not found after installation"
+            exit 1
+        fi
+        print_success "Homebrew installed"
+
+        # Add Homebrew to PATH (idempotent: skip if already in ~/.zprofile)
+        append_once "eval \"\$(${brew_path} shellenv)\"" ~/.zprofile
+        eval "$(${brew_path} shellenv)"
+        print_success "Homebrew added to PATH"
+
+        # Persist mirror config so future brew update/install also use the mirror
+        if [[ ${#brew_mirror_env[@]} -gt 0 ]]; then
+            for env_line in "${brew_mirror_env[@]}"; do
+                append_once "$env_line" ~/.zprofile
+            done
+            print_success "Homebrew mirror config saved to ~/.zprofile"
         fi
     fi
 fi
@@ -222,20 +337,24 @@ if confirm_step "Install Node.js via NVM" "Node Version Manager (NVM) allows you
     if command_exists nvm; then
         print_success "NVM already installed"
     else
-        brew install nvm
-        
+        if ! brew install nvm; then
+            print_error "Failed to install NVM"
+            exit 1
+        fi
+
         # Create NVM directory
         mkdir -p ~/.nvm
-        
-        # Add NVM to shell profile
-        echo 'export NVM_DIR="$HOME/.nvm"' >> ~/.zshrc
-        echo '[ -s "/opt/homebrew/opt/nvm/nvm.sh" ] && \. "/opt/homebrew/opt/nvm/nvm.sh"' >> ~/.zshrc
-        echo '[ -s "/opt/homebrew/opt/nvm/etc/bash_completion.d/nvm" ] && \. "/opt/homebrew/opt/nvm/etc/bash_completion.d/nvm"' >> ~/.zshrc
-        
+
+        # Add NVM to shell profile (idempotent; path varies by brew prefix)
+        nvm_prefix="$(brew --prefix nvm)"
+        append_once 'export NVM_DIR="$HOME/.nvm"' ~/.zshrc
+        append_once "[ -s \"${nvm_prefix}/nvm.sh\" ] && \\. \"${nvm_prefix}/nvm.sh\"" ~/.zshrc
+        append_once "[ -s \"${nvm_prefix}/etc/bash_completion.d/nvm\" ] && \\. \"${nvm_prefix}/etc/bash_completion.d/nvm\"" ~/.zshrc
+
         # Source NVM
         export NVM_DIR="$HOME/.nvm"
-        [ -s "/opt/homebrew/opt/nvm/nvm.sh" ] && \. "/opt/homebrew/opt/nvm/nvm.sh"
-        
+        [ -s "${nvm_prefix}/nvm.sh" ] && \. "${nvm_prefix}/nvm.sh"
+
         print_success "NVM installed"
         
         # Install latest LTS version of Node.js
