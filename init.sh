@@ -529,8 +529,9 @@ step_apps() {
     )
 
     echo -e "${CYAN}The following applications are available for installation:${NC}"
-    for i in "${!apps[@]}"; do
-        echo -e "  ${YELLOW}$((i+1)).${NC} ${apps[$i]}"
+    local app_idx
+    for app_idx in "${!apps[@]}"; do
+        echo -e "  ${YELLOW}$((app_idx+1)).${NC} ${apps[$app_idx]}"
     done
 
     confirm_step "Install Applications" "This will install popular applications like Google Chrome, Firefox, Slack, Postman, Rectangle (window manager), Alfred (Spotlight replacement), Notion and Obsidian (note-taking apps), and Figma (design tool)." allow_back
@@ -672,20 +673,22 @@ STEPS=(
 # 3 = auto-skipped precondition (keep moving in the current direction,
 # so going back can pass through it instead of bouncing forward).
 run_steps() {
-    local i=0
-    local direction=1
-    while (( i >= 0 && i < ${#STEPS[@]} )); do
-        "${STEPS[$i]}"
+    # Deliberately uncommon names: bash locals are dynamically scoped, so a
+    # step function reusing a generic name like `i` would corrupt this loop
+    local _step_idx=0
+    local _step_dir=1
+    while (( _step_idx >= 0 && _step_idx < ${#STEPS[@]} )); do
+        "${STEPS[$_step_idx]}"
         case $? in
-            2) direction=-1 ;;
+            2) _step_dir=-1 ;;
             3) ;;
-            *) direction=1 ;;
+            *) _step_dir=1 ;;
         esac
-        (( i += direction ))
-        if (( i < 0 )); then
+        (( _step_idx += _step_dir ))
+        if (( _step_idx < 0 )); then
             echo -e "${YELLOW}Already at the first step${NC}"
-            i=0
-            direction=1
+            _step_idx=0
+            _step_dir=1
         fi
     done
 }
