@@ -637,11 +637,6 @@ step_workspace() {
 
 # Final step: suggest a restart
 step_restart() {
-    print_section "Setup Complete!"
-    echo -e "${GREEN}Your Mac has been set up for development.${NC}"
-    echo -e "${YELLOW}Some changes may require a restart to take effect.${NC}"
-    echo -e "${GREEN}Enjoy your new development environment!${NC}"
-
     confirm_step "Restart Computer" "It's recommended to restart your computer to ensure all changes take effect properly." allow_back
     case $? in 2) return 2 ;; 1) return 0 ;; esac
 
@@ -721,3 +716,9 @@ echo -e "${CYAN}Press Enter to begin your setup journey or Ctrl+C to exit...${NC
 read -r
 
 run_steps
+
+# Final message
+print_section "Setup Complete!"
+echo -e "${GREEN}Your Mac has been set up for development.${NC}"
+echo -e "${YELLOW}Some changes may require a restart to take effect.${NC}"
+echo -e "${GREEN}Enjoy your new development environment!${NC}"
